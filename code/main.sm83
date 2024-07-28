@@ -1,0 +1,992 @@
+INCLUDE "inc/hardware.inc"
+INCLUDE "inc/macros.inc"
+INCLUDE "inc/constants.inc"
+
+SECTION "crash", ROM0[$38]
+Crash:
+	ld b, b ; todo : crash handler
+	jr @
+
+SECTION "ivblank", ROM0[$40]
+iVBlank:
+	push af
+	push bc
+	push de
+	push hl
+	jp VBlank ; hope this doesnt end badly
+
+SECTION "istat", ROM0[$48]
+iStat:
+	reti ; only used to break out of HALT
+
+SECTION "itimer", ROM0[$50]
+iTimer:
+	rst Crash ; shouldnt be called
+
+SECTION "iserial", ROM0[$58]
+iSerial:
+	rst Crash ; shouldnt be called
+
+SECTION "ijoypad", ROM0[$60]
+iJoypad:
+	rst Crash ; shouldnt be called
+
+SECTION "entry", ROM0[$100]	; execution starts at $100
+EntryPoint:
+	di ; nintendo recommends a nop, everyone else a di
+	jp Intro
+	ds $150-@, $00 ; pad for the required GB header
+	INCLUDE "inc/header.inc" ; my extended header, can be safely removed
+
+SECTION "main", ROM0
+MainLoop:: ; quickly setup title screen
+	; SGB palette
+	ld hl, wSPalTitle
+	call Packet
+	; DMG palette
+	ld a, $e4
+	ldh [rBGP], a
+	; LCDC
+	ld a, MENU_LCDC ; since everything is already
+	ldh [rLCDC], a ; loaded this all works just fine
+.loop
+	halt
+	call Joy
+	ldh a, [hP1]
+	ld b, a
+	ldh a, [hP1.x]
+	and b
+	ld b, a
+	and PADF_START
+	jr nz, .start
+	ld a, b
+	and PADF_SELECT
+	jr z, .skipDebugPalEn
+	;ld a, DEBUGF_PALETTE
+	;ldh [hDebug], a
+	; as a placeholder, CPU meter replaced by wrapping toggle
+	ldh a, [hWrapping]
+	cpl
+	ldh [hWrapping], a
+	.skipDebugPalEn
+	call rand
+	jr .loop
+.start
+	; init
+	call GameInit
+	; SGB palette
+	ld hl, wSPalGame
+	call Packet
+	; LCDC
+	ld a, GAME_LCDC
+	ldh [rLCDC], a
+.gameLoop
+	halt ; since im only using VBlank int, a halt is fine
+	; cpu ussage meter
+	ld a, [hDebug]
+	and DEBUGF_PALETTE
+	jr z, .skipDebugPal
+		:ldh a, [rLY]
+		cp 1
+		jr nz, :-
+		ld a, DEBUG_PALETTE
+		ldh [rBGP], a
+	.skipDebugPal
+	call Joy ; poll (read) joypad(s)
+	call JoyCheck
+	call Snake ; basically all the game code in one routine
+	call JoyCurrent ; display the snake direction
+	call Score ; tally score
+	call Time ; inc timer
+	call StatusbarUpdate
+	ldh a, [hFood] ; check food
+		cp $ff
+		call z, FoodReroll
+	; funny palette
+		ld a, $e4
+		ldh [rBGP], a
+	ld a, [hP1]
+	ld b, a
+	ld a, [hP1.x]
+	and b
+	and PADF_START
+	jp nz, .pause
+	jr .gameLoop
+.pause
+	ld hl, wPauses
+	ld a, [hl]
+	inc a
+	ld [hl], a
+	cp 10
+	jr c, .skipPauseCap
+	xor a
+	ld [hl+], a
+	ld a, [hl]
+	inc a
+	ld [hl], a
+	cp 10
+	jr c, .skipPauseCap
+	ld a, 9
+	ld [hl-], a
+	ld [hl], a
+	.skipPauseCap
+	ld hl, PauseTilemap
+	ld de, _SCRN0+$10
+	ld bc, 4
+	call SafeCpy
+	call StatusbarUpdate
+.pauseLoop
+	halt
+	call Joy
+	call JoyCheck
+	call JoyCurrent
+	; update score counter if required
+		ldh a, [hBonus+0]
+		ld b, a
+		ldh a, [hBonus+1]
+		or b
+		jr z, .skipScoreUpdate
+		call Score
+		call StatusbarUpdate
+	.skipScoreUpdate
+	ld a, [hP1]
+	ld b, a
+	ld a, [hP1.x]
+	and b
+	and PADF_START
+	jr nz, .unpause
+	jr .pauseLoop
+.unpause
+	ld hl, wGameTilemap+$10
+	ld de, _SCRN0+$10
+	ld bc, 4
+	call SafeCpy
+	jp .gameLoop
+
+SECTION "joycurrent", ROM0
+JoyCurrent:
+	ldh a, [hFacing]
+	and a
+	ret z ; exit if no input
+	ld hl, wGameTilemap.statusbar+SCRN_X_B-1+(SCRN_VX_B*1)
+	ld b, BASE_ARROW-1
+	.loop
+	inc b
+	rla
+	jr nc, .loop
+	; push to statusbar
+	ld [hl], b
+	ret
+
+SECTION "joycheck", ROM0
+JoyCheck:: ; check if input changed
+	ldh a, [hP1]
+	ld b, a
+	ldh a, [hFacing.forbid] ; discard 180s
+	cpl
+	and b
+	and $f0
+	ret z ; check if any key pressed
+	ld b, a
+	ld a, [hFacing]
+	and b ; bitmask new and last input
+	ret nz ; check if current key not pressed
+	; convert to new Facing and movement vectors
+	ld a, b
+	ld de, 0
+	rla ; down
+	jr nc, :+
+	inc d
+	ld a, PADF_DOWN
+	jr .done
+:	rla ; up
+	jr nc, :+
+	dec d
+	ld a, PADF_UP
+	jr .done
+:	rla ; left
+	jr nc, :+
+	dec e
+	ld a, PADF_LEFT
+	jr .done
+:	rla ; right
+	jr nc, :+
+	inc e
+	ld a, PADF_RIGHT
+	jr .done
+:	xor a
+.done ; store to RAM
+	ldh [hFacing], a
+	ld a, d
+	ldh [hVel.y], a
+	ld a, e
+	ldh [hVel.x], a
+	ret
+
+SECTION "statusbarupdate", ROM0
+StatusbarUpdate:
+	ld c, BASE_DECIMAL
+	; score
+	ld hl, wGameTilemap.statusbar+0
+	ld a, BASE_STATUSBAR+0
+	ld [hl+], a
+	inc a
+	ld [hl+], a
+	ld de, wScore.end
+	ld b, wScore.end - wScore
+	.scoreLoop
+	dec de
+	ld a, [de]
+	add c
+	ld [hl+], a
+	dec b
+	jr nz, .scoreLoop
+	; length
+	ld hl, wGameTilemap.statusbar+14
+	ld a, BASE_STATUSBAR+2
+	ld [hl+], a
+	inc a
+	ld [hl+], a
+	ld de, wLength.end
+	ld b, wLength.end - wLength
+	.lengthLoop
+	dec de
+	ld a, [de]
+	add c
+	ld [hl+], a
+	dec b
+	jr nz, .lengthLoop
+	; time
+	ld hl, wGameTilemap.statusbar+$20
+	ld a, BASE_STATUSBAR+4
+	ld [hl+], a
+	inc a
+	ld [hl+], a
+	ld de, wTime.end
+	ld b, BASE_TIME
+	.timeLoop
+	rept 2
+		dec de
+		ld a, [de]
+		add c
+		ld [hl+], a
+	endr
+	ld [hl], b
+	inc hl
+	inc b
+	ld a, b
+	cp BASE_TIME+4
+	jr nz, .timeLoop
+	; pauses
+	ld hl, wGameTilemap.statusbar+$20+14
+	ld a, BASE_STATUSBAR+6
+	ld [hl+], a
+	inc a
+	ld [hl+], a
+	ld de, wPauses.end
+	.pauseLoop
+	rept 2
+		dec de
+		ld a, [de]
+		add c
+		ld [hl+], a
+	endr
+	ret
+
+SECTION "score", ROM0
+Score:
+	; check if grading enabled
+	ldh a, [hGrading]
+	and a
+	ret nz
+	; load bonus to de, exit if zero
+	ldh a, [hBonus+0]
+	ld e, a
+	ldh a, [hBonus+1]
+	ld d, a
+	or e
+	ret z
+	; make these two point at the 4th digit
+	; they will be decremented each time a digit inc check fails
+	ld hl, wScore + 3
+	ld b, wScore.end - (wScore + 3)
+	; subtract some amount from hBonus (see below)
+	FOR V, 4
+		DEF TENS = 10**(3-V) ; figuring out that its DEF = and not SET = was like the worst part
+		if V == 0
+			; for 4096+, sub 1000
+			ld a, $f0
+			and d
+		elif V == 1
+			; for 256+, sub 100
+			ld a, d
+			and a
+		elif V == 2
+			; for 16+, sub 10
+			ld a, $f0
+			and e
+		elif V == 3
+			; for 1+, sub 1
+		else
+			fail "too many iterations or something"
+		endc
+		if V < 3
+			jr z, .skip{u:TENS}
+			; subtract a certain value (see above) from hBonus
+			ld a, e
+			sub LOW(TENS)
+			ldh [hBonus+0], a
+			ld a, d
+			sbc HIGH(TENS)
+			ldh [hBonus+1], a
+			jr .loop
+		.skip{u:TENS}
+			inc b
+			dec hl
+		else
+			; subtract 1 from hBonus
+			dec de
+			ld a, e
+			ldh [hBonus+0], a
+			ld a, d
+			ldh [hBonus+1], a
+		endc
+	ENDR
+	; then increment wScore by that value
+	.loop
+	ld a, [hl]
+	inc a
+	ld [hl], a
+	cp 10
+	ret c
+	xor a
+	ld [hl+], a
+	dec b
+	jr nz, .loop
+	; if score caps out, set it to max and disable grading
+	ld b, 8
+	dec hl
+	ld a, 9
+	.max
+	ld [hl-], a
+	dec b
+	jr nz, .max
+	ld a, 1
+	ldh [hGrading], a
+	ret
+
+AddBonus:: ; hBonus += bc, caps at $ffff on overflow
+	ldh a, [hBonus+0]
+	ld l, a
+	ldh a, [hBonus+1]
+	ld h, a
+	add hl, bc
+	jr nc, .noOverflow
+	ld hl, -1
+	.noOverflow
+	ld a, l
+	ldh [hBonus+0], a
+	ld a, h
+	ldh [hBonus+1], a
+	ret
+
+SECTION "time", ROM0
+Time: ; uses hl as an argument
+		; this is incorrect??? i do recall wanting a pause timer though
+	; check if grading enabled
+	ldh a, [hGrading]
+	and a
+	ret nz
+	; increment timer
+	ld hl, wTime
+	ld de, TimeLUT
+	ld b, wTime.end - wTime
+	.loop
+	ld a, [de]
+	inc e
+	ld c, [hl]
+	inc c
+	ld [hl], c
+	cp c
+	ret nc
+	xor a
+	ld [hl+], a
+	dec b
+	jr nz, .loop
+	; if caps out, set to max and disable grading
+	ld b, 8
+	dec hl
+	.max
+	dec e
+	ld a, [de]
+	ld [hl-], a
+	dec b
+	jr nz, .max
+	ld a, 1
+	ldh [hGrading], a
+	ret
+
+SECTION "timelut", ROM0, ALIGN[3]
+TimeLUT:
+db 9, 5, 9, 5, 9, 5, 9, 9
+
+SECTION "length", ROM0
+Length:
+	; check if grading enabled
+	ldh a, [hGrading]
+	and a
+	ret nz
+	; increment length
+	ld hl, wLength
+	ld b, wLength.end - wLength
+	.loop
+	ld a, [hl]
+	inc a
+	ld [hl], a
+	cp 10
+	ret c
+	xor a
+	ld [hl+], a
+	dec b
+	jr nz, .loop
+	; if caps out, set to max and disable grading
+	ld b, 8
+	dec hl
+	ld a, 9
+	.max
+	ld [hl-], a
+	dec b
+	jr nz, .max
+	ld a, 1
+	ldh [hGrading], a
+	ret
+
+SECTION "snake", ROM0
+Snake:	
+	; make sure next part only runs when needed
+	; check if A or B is held
+		; do these comments make sense?
+	ldh a, [hP1]
+	and PADF_A | PADF_B ; clears carry?
+	ld b, a
+	rra
+		ASSERT PADF_A | PADF_B == $03
+	or b
+	and $01 ; also clears carry?
+	rra
+	; advance delay counter
+	ldh a, [hDelay]
+	sbc 1
+	ldh [hDelay], a
+	ret nc
+	; if enough frames pass, reset the counter and run snake logic
+	ld a, SNAKE_DELAY - 1
+	ldh [hDelay], a
+	; do not mind these comments
+		; uhhhh do stuff? todo: stuff
+		; (sorry i was happy with having input and decided thats enogu hfor me)
+		; seriously zlago, write this thing already
+		; hello past me, thanks for the funny comment
+	
+	; but before that we must talk about our sponsor
+	; the funny anti-180 logic!
+	ldh a, [hFacing]
+	ld b, -1
+	or a ; clear carry
+:	rla ; convert to shifts
+	inc b
+	jr nc, :-
+	rla ; ld a, $01
+	xor b ; swap bit 0
+	ld b, a
+	xor a
+	scf
+	inc b
+	:rra ; convert back to rP1 format
+	dec b
+	jr nz, :-
+	ldh [hFacing.forbid], a
+	; AHEM start by fetching the current position
+	ld hl, wSnakeBuffer.head
+	ld a, [hl] ; advance snake head
+	inc a
+	ld [hl], a
+	ld l, a
+	dec l
+	ld h, HIGH(wSnakeBuffer.y) ; advance snake
+	ldh a, [hVel.y]
+	add [hl] ; then apply velocity
+	cp 16 ; if OOB, check mode
+	jr c, .noWallY
+	ld b, a
+	ldh a, [hWrapping]
+	and a
+	call z, GameOver ; kill if wrapping disabled
+	ld a, b
+	and $0f ; wrap around otherwise
+.noWallY
+	inc l
+	ld [hl], a
+	dec l
+	; repeat for X
+	inc h
+		ASSERT FAIL, wSnakeBuffer.x - wSnakeBuffer.y == 256
+		ASSERT FAIL, wSnakeBuffer & $ff == 0
+	ldh a, [hVel.x]
+	add [hl] ; then apply velocity
+	cp 16 ; if OOB, check mode
+	jr c, .noWallX
+	ld b, a
+	ldh a, [hWrapping]
+	and a
+	call z, GameOver ; kill if wrapping disabled
+	ld a, b
+	and $0f ; wrap around otherwise
+.noWallX
+	inc l
+	ld [hl], a
+	; check if colliding with food
+	ld c, [hl]
+	ld a, [hFood.x]
+	cp c
+	jr nz, .skipFood
+	dec h
+	ld c, [hl]
+	ld a, [hFood.y]
+	cp c
+	jr nz, .skipFood
+	ld a, [wSnakeBuffer.length]
+	cp 255
+	adc 0 ; dont go past 255 length
+	ld [wSnakeBuffer.length], a
+	call FoodEaten
+	.skipFood
+	; check if colliding with self
+	ld a, [wSnakeBuffer.length]
+	cp 1
+	jr c, .skipSnake
+	ld b, a ; b = length
+	ld a, [wSnakeBuffer.head]
+	ld h, HIGH(wSnakeBuffer.x)
+	ld l, a
+	ld e, [hl] ; d = Y, e = X
+	dec h
+	ld d, [hl]
+	dec l
+	dec b
+	call SnakeCollision
+	and a ; check if zero
+	call nz, GameOver
+	.skipSnake
+	; display everything but head
+	call SnakeDisplay
+	; display head
+	ld a, [wSnakeBuffer.head]
+	call SnakePosDir ; get position and direction
+	add a, BASE_SNAKE_HEAD ; add offset
+	jp Pos2SCRN ; tail call
+	; fin, done, no more, goto(hell), abort, i dont care now, bye-bye
+
+SnakeDisplay::
+	; undisplay tail
+	ld a, [wSnakeBuffer.length]
+	ld b, a
+	ld a, [wSnakeBuffer.head]
+	sub b
+	push af ; save for later
+	call SnakePosDir
+	ld a, b
+	xor a, c ; check if current pos is even/odd
+	and a, BASE_EMPTY | %1 ; discard upper bits
+	call Pos2SCRN
+	; display body
+	ld a, [wSnakeBuffer.head]
+	call SnakePosDir ; get position and direction
+	push af ; save for later
+	ld a, [wSnakeBuffer.head]
+	dec a
+	call SnakePosDir ; get more positions and directions
+	; do epic maths
+	pop de
+	or a ; clear carry
+	rla ; multiply by 2
+	rla
+	or d
+	add a, BASE_SNAKE_BODY ; add offset
+	call Pos2SCRN
+	; display tail
+	pop af ; reuse value used by untail
+	inc a
+	push af
+	inc a
+	call SnakePosDir ; get direction
+	pop de
+	push af
+	ld a, d
+	call SnakePosDir ; get position
+	pop af
+	add a, BASE_SNAKE_TAIL ; add offset
+	jp Pos2SCRN ; tail call
+
+SnakeCollision:: ; returns 0 if no collision, $ff if collided
+	.loop ; enter with h = buffer.y, l = snake head, b = length, de = YX to check
+	ld a, [hl]
+	cp d ; check y
+	jr nz, .skip
+	inc h
+	ld a, [hl]
+	dec h
+	cp e
+	jr nz, .skip
+	ld a, $ff
+	ret
+	.skip
+	dec l
+	dec b
+	jr nz, .loop
+	xor a
+	ret
+
+SnakePosDir:: ; bc = position of snake cell [a]
+	; a = direction of snake cell [a], clobbers hl, de
+	ld l, a
+	ld h, HIGH(wSnakeBuffer.y)
+	ld b, [hl] ; current Y pos
+	dec l
+	ld d, [hl] ; last Y pos
+	inc h
+		ASSERT FAIL, wSnakeBuffer.x - wSnakeBuffer.y == 256
+		ASSERT FAIL, wSnakeBuffer & $ff == 0
+	ld e, [hl] ; last X pos
+	inc l
+	ld c, [hl] ; current X pos
+	; convert to offset
+	ld a, b
+	sub d
+	ld d, a
+	ld a, c
+	sub e
+	ld e, a
+	; prep for LUT
+	xor a
+	; Y
+	rr d
+	rra
+	rr d
+	rra
+	; X
+	rr e
+	rra
+	rr e
+	rra
+	; fix
+	swap a
+	; fetch dir
+	ld d, HIGH(OffDirLUT)
+	ld e, a
+	ld a, [de]
+	; done
+	ret
+
+FoodEaten::
+	; calculates score then sort of adds it, the exact formula should be:
+	; min(100, food eaten / 2 + 1) * min(255, BONUS_FOOD + hFood.fail * 50%)
+
+	; add 50% to the base bonus for
+	; each food spawn fail
+		ld b, BONUS_FOOD/2
+			assert HIGH(BONUS_FOOD/2) == 0
+		ldh a, [hFood.fail]
+		add 2
+		ld c, a
+		call Multiply
+	; cap at 255
+		ld a, h
+		ld c, l
+		and a ; also clears carry
+		jr z, .noFailCap
+		ld c, $ff
+		.noFailCap
+	; get amount of eaten food by doing math on wSnakeBuffer.length
+	; (wSnakeBuffer.length = food eaten + SNAKE_LENGTH)
+		ld a, [wSnakeBuffer.length]
+		sub SNAKE_LENGTH-1 ; but we also need to pre-increment
+			; (otherwise 1st pellet gives no score)
+	; then divide and cap at 100
+		rra
+		cp 100
+		jr c, .noLengthCap
+		ld a, 100
+		.noLengthCap
+	; finally, multiply the capped length by capped base bonus
+		ld b, a
+		call Multiply
+		ld b, h
+		ld c, l
+		call AddBonus
+	; then inc the displayed length
+		call Length
+	; and reset the pellet
+		jp FoodReset ; tail call
+
+FoodReset::
+	ld a, $ff
+	ldh [hFood.y], a
+	ldh [hFood.x], a
+	ret
+
+FoodReroll::
+	; get random position
+	call rand
+	ld b, a
+	and $0f
+	ld e, a
+	ld a, b
+	swap a
+	and $0f
+	ld d, a
+	; check if valid
+	ld a, [wSnakeBuffer.length]
+	ld b, a ; b = length
+	ld a, [wSnakeBuffer.head]
+	ld h, HIGH(wSnakeBuffer.y)
+	ld l, a
+	call SnakeCollision
+	and a ; check if zero
+	jr nz, .failed
+	xor a
+	ld [hFood.fail], a
+	; store
+	ld a, d
+	ldh [hFood.y], a
+	ld a, e
+	ldh [hFood.x], a
+	; display
+	ldh a, [hFood.y]
+	ld b, a
+	ldh a, [hFood.x]
+	ld c, a
+	ld a, $04
+	call Pos2SCRN
+	ret
+.failed
+	ld a, [hFood.fail]
+	inc a
+	ret z
+	ld [hFood.fail], a
+	ret
+
+Pos2SCRN: ; hl = bc as SCRN position, a = a
+	push af
+	ld h, 0
+	ld l, b
+	REPT 5 ; turn into a SCRN position
+		add hl, hl
+	ENDR
+	ld a, c
+	and (SCRN_VX_B - 1) << 0
+	or l
+	ld l, a
+	ld a, h
+	and (SCRN_VY_B - 1) >> 3
+	or HIGH(_SCRN0)
+	ld h, a
+	pop af
+	jp VBufferPush ; tail calling
+
+SECTION "gameover", ROM0
+GameOver:
+	; reset palette, show how the player died, nuke stack
+		ld a, $e4
+		ldh [rBGP], a
+		call SnakeDisplay
+		ld sp, wStack.origin
+	; load game over graphic
+		ld hl, GameOverTilemap
+		ld de, _SCRN0+$10+(0*SCRN_VX_B)
+		ld bc, 4
+		call SafeCpy
+		push hl ; save for later
+	.score ; wait for score to finish counting
+		halt
+		call Score
+		call StatusbarUpdate
+		ldh a, [hBonus+0]
+		ld b, a
+		ldh a, [hBonus+1]
+		or a, b
+		jr nz, .score
+	; stall for half a second more
+		ld a, 30
+	.delay
+		halt
+		dec a
+		jr nz, .delay
+	; load rest
+		pop hl
+		ld de, _SCRN0+$10+(1*SCRN_VX_B)
+		ld bc, 4
+		call SafeCpy
+		ld de, _SCRN0+$10+(2*SCRN_VX_B)
+		ld bc, 4
+		call SafeCpy
+	.loop
+	halt
+	call Joy
+	ld a, [hP1]
+	ld b, a
+	ld a, [hP1.x]
+	and b
+	and PADF_A | PADF_B
+	jr z, .loop
+	and PADF_A
+	jp nz, MainLoop.start
+	jp MainLoop
+
+SECTION "offdirlut", ROM0, ALIGN[8]
+OffDirLUT:
+; Y =  0,+1,Er,-1
+    db 1, 0, 0, 1 ; X =  0
+    db 3, 3, 3, 1 ; X = +1
+    db 0, 0, 0, 1 ; X = Er
+    db 2, 2, 2, 1 ; X = -1
+
+SECTION "snakebuffer", WRAM0, ALIGN[8]
+wSnakeBuffer::
+	.y::		ds 256	; ring buffer, y
+	.x::		ds 256	; x
+	.head::		ds 1	; snake head, as buffer position
+	.length::	ds 1	; snake length
+	.end::
+
+SECTION "gamedata", WRAM0
+wGameData::
+wScore:: ; total score
+	ds 8
+	.end::
+wTime:: ; in game time
+	ds 8
+	.end::
+wLength:: ; food eaten
+	ds 3
+	.end::
+wPauses:: ; # of pauses
+	ds 2
+	.end::
+wGameDataEnd::
+
+SECTION "other", HRAM
+	hOther::
+	hFacing::   ds 1 ; current direction, as input
+	.forbid::   ds 1 ; last direction
+	hDelay::    ds 1 ; frames before next move
+	hVel:: ; current direction, as a vector
+		.y::    ds 1 
+		.x::    ds 1
+	hFood: ; fruit position
+		.y      ds 1
+		.x      ds 1
+		.fail   ds 1 ; fruit spawn attempts
+	hBonus::    ds 2 ; score to be added
+	hGrading::  ds 1 ; nonzero disables grading
+	hDebug::    ds 1 ; funny performance viewer
+	hWrapping:: ds 1 ; self-explainatory hopefully
+	hOtherEnd::
+	hConsole::  ds 1 ; console version
+
+SECTION "tilemapbuffers", WRAM0, align[1]
+wGameTilemap::
+	ds SCRN_VX_B*(SCRN_Y_B-2)
+	.statusbar::
+	ds SCRN_VX_B*2
+	.end::
+wTitleTilemap::
+	ds SCRN_VX_B*SCRN_Y_B
+	.end::
+
+SECTION "graphics", ROM0, align[1]
+Base2bpp::
+	INCBIN "gfx/bin/base.2bpp"
+	.end::
+Statusbar1bpp::
+	INCBIN "gfx/bin/statusbar.1bpp"
+	.end::
+Arrow2bpp::
+	INCBIN "gfx/bin/arrows.2bpp"
+	.end::
+Title1bpp::
+	INCBIN "gfx/bin/title.1bpp"
+	.end::
+GameOver1bpp::
+	INCBIN "gfx/bin/gamestop.1bpp"
+	.end::
+
+SECTION "tilemaps", ROM0
+GameTilemap::
+	INCBIN "gfx/bin/game.tilemap"
+	.end::
+TitleTilemap::
+	INCBIN "gfx/bin/title.tilemap"
+	.end::
+GameOverTilemap::
+	INCBIN "gfx/bin/gamestop.tilemap", 4, 12
+	.end::
+PauseTilemap::
+	INCBIN "gfx/bin/gamestop.tilemap", 0, 4
+	.end::
+
+SECTION "sgbdata", ROM0, align[1]
+BorderTiles::
+	INCBIN "gfx/bin/border.4bpp"
+	.end::
+BorderTilemap::
+	INCBIN "gfx/bin/border.pct", 32 * 2
+	.end::
+BorderPalette::
+	INCBIN "gfx/bin/border.pal"
+	.end::
+
+SAttr::
+SAttrTitle::
+	ds 90,	%00_00_00_00
+.end::
+SAttrGame::
+	rept 16
+	ds 4,	%01_01_01_01
+	db	%00_00_00_00
+	endr
+	ds 10,	%00_00_00_00
+	.end::
+SAttrEnd::
+
+SPal::
+BaseSPal::
+	INCBIN "gfx/bin/base.spal"
+	.end::
+SnakeSPal::
+	INCBIN "gfx/bin/snake.spal"
+	.end::
+SPalEnd::
+
+BaseCPal:: ; cpals are broken, this should be changed once theyre fixed
+	INCBIN "gfx/bin/base.spal"
+	.end::
+SnakeCPal::
+	INCBIN "gfx/bin/snake.spal"
+	.end::
+
+SECTION "snaketiles", ROM0, align[1]
+Snake2bpp::
+	INCBIN "gfx/bin/snake.2bpp"
+	.end::
+
+SECTION "devmessage", ROMX
+db "would you look at that, someone checked this in a hex editor! well, hi there! im zlago, and this "
+db "is a little hidden easter egg that may or may not become viewable in-game, anyways, heres a list of "
+db "cool people, some of them even directly helped! :"
+Greets::
+db "Eievui/Evie, PinoBatch/Pin8, ISSO/ISSOtm, calc84maniac, rangi, bbbbbr, aaaaaa123456789/ax6, "
+db "yumaikas, piellow/lordpillows, nezuo, kaselord, falcon nova, hail, delivery cat, zeta0134, kasumi, "
+db "bella marie, leina, genericheroguy, tachy/wolfy, valen/coffee bat"
+db "\nthis was quite fun to make, reaching the end of v1.0 felt quite special, and.. "
+db "ok i dont have much else to say, thanks for finding this data, cya! *ceases to exist*"

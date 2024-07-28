@@ -1,0 +1,574 @@
+; perform any initialisation required before the game starts
+
+INCLUDE "inc/hardware.inc"
+INCLUDE "inc/macros.inc"
+INCLUDE "inc/constants.inc"
+
+SECTION "init", ROM0
+Intro::
+	; stack setup and register preserving
+	ld sp, wStack.origin
+	push hl
+	push de
+	push bc
+	push af
+	ld a, c
+	cp $13
+	jr nz, ColorCheck
+  ; prepare for the intro animation
+	ld a, STATF_LYC
+	ldh [rSTAT], a
+	xor a
+	ldh [rIF], a
+	ld a, IEF_STAT
+	ldh [rIE], a
+	ld hl, rLYC
+	lb de, 144, 72
+	lb bc, 136/4, LOW(rSCX)
+	ei
+	xor a
+	ld [hl], d
+.loop
+	halt
+	ld [hl], e
+	cpl
+	ldh [c], a ; slide the top half right
+		push af
+		push hl
+		ld h, HIGH(_SCRN0+$100)
+		ld a, 6*2
+		add b
+		and a ; clear cy
+		rra ; divide
+		ld l, a
+		xor a
+		ld [hl], a
+		ld a, l
+		ld a, $32
+		sub l
+		ld l, a
+		xor a
+		ld [hl], a
+		pop hl
+		pop af
+	halt
+	ld [hl], d
+	cpl
+	ldh [c], a ; slide the bottom half left
+	add 4
+	dec b
+	jr nz, .loop
+	xor a
+	ldh [rBGP], a
+		di
+ColorCheck: ; its a mess!
+	pop af
+		push af
+	cp $11
+	jr nz, .noColor
+	ld a, CONSOLEF_CGB
+	bit 0, b
+	jr z, .noModelC
+	or CONSOLEF_MOD
+	jr .modelC
+	.noColor
+	cp $1
+	ld a, 0
+	jr z, .noModelNC
+	ld a, CONSOLEF_MOD
+	.noModelNC
+	.noModelC
+	.modelC
+	ld [hConsole], a
+
+/* temporarily removed cause itll trip on the homebrew hub emulator
+EmuTest: ; using this dumb method, you can catch almost every emulator!
+	pop af
+		pop bc
+		pop de
+		pop hl
+	ld de, EmuRegs
+	.test
+		ld hl, sp-8
+		lb bc, 8, 0
+		.testloop
+			ld a, [de]
+			cp [hl]
+			jr z, :+
+				inc c
+			:inc de
+			inc hl
+			dec b
+			jr nz, .testloop
+		ld a, c
+		and a
+		jp z, Start
+		ld a, LOW(EmuRegs.end)
+		cp e
+		jr nz, .test
+	ld hl, Bad1bpp
+	ld de, _VRAM
+	ld bc, Bad1bpp.end - Bad1bpp
+	call SafeCpy1bpp
+	; quick init
+	; clear this stupid buffer to prevent garbage from displaying
+	ld hl, wGameTilemap.statusbar
+	ld b, wGameTilemap.end - wGameTilemap.statusbar
+	xor a
+	ld [wVBuffer.size], a ; also clear this
+	call ShortSet
+	; enable interrupts
+	ldh [rIF], a ; a should be 0
+	ld a, IEF_VBLANK
+	ldh [rIE], a
+	ei
+	; init the tilemap
+	xor a
+	ldh [rSCY], a
+	ldh [rSCX], a
+	ld hl, _SCRN0+($20*6)+$4 ;offset the screen
+	ld de, 20 ; tiles to skip
+	lb bc, 5, 12 ; rows and columns
+	halt
+	.map
+		ld [hl+], a
+		inc a
+		dec c
+		jr nz, .map
+		ld c, 12
+		add hl, de
+		dec b
+		jr nz, .map
+	ld a, $e4
+		ldh [rBGP], a
+	ld a, BCPSF_AUTOINC | 0
+		ld hl, BadPal
+		lb bc, BadPal.end - BadPal, LOW(rBCPS)
+		call PalCpy
+	ld b, 13
+	; wait till 13 START presses
+	.loop
+	halt
+	push bc
+	ld b, 1
+	call Joy
+	pop bc
+	ldh a, [hP1]
+	ld c, a
+	ldh a, [hP1.x]
+	and c
+	and PADF_A
+	jr z, .loop
+	dec b
+	jr nz, .loop
+	di
+*/
+Start: ; the screen on SGB shows a white frame for a few frames, i dont know how to fix that..
+	; test for SGB
+	xor a
+	ldh [rLYC], a
+	ld a, STATF_LYC
+	ldh [rSTAT], a
+	ld a, IEF_STAT
+	ldh [rIE], a
+	ei
+		; wait for SGB
+		ld b, 12
+		:halt
+		dec b
+		jr nz, :-
+		; enable multi
+		ld hl, Packets.mlt
+		call Packet
+		rept 4
+			halt
+		endr
+		; check if SGB responds
+			lb bc, 5, LOW(rP1)
+			:ld a, P1F_4
+			ldh [c], a
+			ld a, P1F_4|P1F_5
+			ldh [c], a
+			ldh a, [c]
+			dec b
+			jp z, .init ; give up
+			cp $ff
+			jr z, :- ; try again if failed
+			ld a, [hConsole]
+			or CONSOLEF_SGB
+			ld [hConsole], a
+		; mask the screen
+		ld hl, Packets.mask
+		call Packet
+		; prepare for funny _TRNs!
+		ld hl, wGameTilemap
+		ld bc, wGameTilemap.end - wGameTilemap
+		xor a
+		call MemSet ; clear map so emulators wont cry
+		; init I/O
+		ld a, LCDCF_ON|LCDCF_WINOFF|LCDCF_BG8000|LCDCF_BG9800|LCDCF_OBJOFF|LCDCF_BGON
+		ldh [rLCDC], a
+		ld a, $e4
+		ldh [rBGP], a
+		xor a
+		ldh [rSCY], a
+		ldh [rSCX], a
+		ld hl, wGameTilemap ; prep tilemap, a must be 0
+		ld de, SCRN_VX_B-SCRN_X_B
+		.row ld b, SCRN_X_B
+		.column ld [hl+], a
+		inc a
+		jr z, .done ; end once all 256 tiles sent
+		dec b
+		jr nz, .column
+		add hl, de ; skip tiles 20-31
+		jr .row
+		.done ; upload the tilemap
+		ld hl, wGameTilemap
+		ld de, _SCRN0
+		ld bc, wGameTilemap.end - wGameTilemap
+		call SafeCpy
+		rept 4
+			halt
+		endr
+		; start sending packets
+		; border tiles
+		ld hl, BorderTiles
+		ld de, _VRAM
+		ld bc, BorderTiles.end - BorderTiles
+		call SafeCpy
+		ld hl, Packets.chr
+		call Packet
+		rept 8
+			halt
+		endr
+		; border nametable
+		ld hl, BorderTilemap
+		ld de, _VRAM
+		ld bc, BorderTilemap.end - BorderTilemap
+		call SafeCpy
+		ld hl, BorderPalette
+		ld de, _VRAM+$800
+		ld bc, BorderPalette.end - BorderPalette
+		call SafeCpy
+		ld hl, Packets.pct
+		call Packet
+		rept 8
+			halt
+		endr
+		; palettes 
+		ld hl, SPal
+		ld de, _VRAM
+		ld bc, SPalEnd - SPal
+		call SafeCpy
+		ld hl, Packets.palTrn
+		call Packet
+		rept 8
+			halt
+		endr
+		; attributes
+		ld hl, SAttr
+		ld de, _VRAM
+		ld bc, SAttrEnd - SAttr
+		call SafeCpy
+		ld hl, Packets.attrTrn
+		call Packet
+		rept 8
+			halt
+		endr
+		; re-1player
+		ld hl, Packets.unMlt
+		call Packet
+		rept 4
+			halt
+		endr
+	; disable interrupts
+	di
+	xor a
+	ldh [rIE], a
+	ldh [rIF], a
+	.init
+	; copy OAM DMA code(???)
+	ld hl, DMAcopy
+	ld de, hDMA
+	ld b, hDMA.end - hDMA
+	call ShortCpy
+	; clear buffers
+		; THIS ENTIRE BLOCK ASSUMES A = 0
+		; clear single bytes
+		xor a
+		ldh [rSCY], a
+		ldh [rSCX], a
+		ldh [hDebug], a
+		; clear shadow OAM
+		ld hl, wSOAM
+		ld b, 160
+		call ShortSet
+		; clear OAM
+		ld a, HIGH(wSOAM)
+		call hDMA ; returns with a = 0
+		; clear snake buffers
+		ld hl, wSnakeBuffer
+		ld bc, wSnakeBuffer.end - wSnakeBuffer + 1
+		call MemSet
+		; clear VRAM update buffer
+		ld hl, wVBuffer
+		ld bc, wVBuffer.size - wVBuffer + 1
+		call MemSet
+		; clear the screen
+		ld hl, _SCRN0
+		ld bc, 1024
+		call SafeSet
+		; clear other variables
+		ld hl, hOther
+		ld b, hOtherEnd - hOther
+		call ShortSet
+		ld [hP1], a
+		; clear tilemaps
+		ld hl, wGameTilemap
+		ld bc, wTitleTilemap.end - wGameTilemap
+		call MemSet
+	; init SGB pal/attr
+	ld hl, Packets.palTitle
+	ld de, wSPalTitle
+	ld b, 16*2
+	call ShortCpy
+	; reset RNG
+	ld bc, 1
+	call srand
+	; prep tilemaps
+	ld hl, GameTilemap ; source
+	ld de, wGameTilemap; dest
+	lb bc, SCRN_Y_B, SCRN_X_B ; rows and columns
+	ld a, SCRN_VX_B-SCRN_X_B ; tiles to skip
+	call TilemapCpy
+	; prep second tilemap
+	ld hl, TitleTilemap ; source
+	ld de, wTitleTilemap; dest
+	lb bc, SCRN_Y_B, SCRN_X_B ; rows and columns
+		ld a, SCRN_VX_B-SCRN_X_B ; tiles to skip
+	call TilemapCpy
+	; copy tilemap
+	ld hl, wTitleTilemap
+	ld de, _SCRN1
+	ld bc, wTitleTilemap.end - wTitleTilemap
+	call SafeCpy
+	; set CGB attributes
+	ld a, %1
+	ldh [rVBK], a
+		ld e, a
+		ld hl, _SCRN0
+		ld c, SCRN_VX_B-16
+		ld d, 16
+		.loopY
+		ld b, 16
+		.loopX
+		.loop
+		ldh a, [rSTAT]
+		and STATF_BUSY
+		jr nz, .loop
+		ld [hl], e
+		inc hl
+		dec b
+		jr nz, .loopX
+		add hl, bc
+		dec d
+		jr nz, .loopY
+	xor a
+	ldh [rVBK], a
+	; copy *ahem* graphics
+	ld hl, Base2bpp
+	ld de, _VRAM
+	ld bc, Base2bpp.end - Base2bpp
+	call SafeCpy
+	; copy snek
+	ld hl, Snake2bpp
+	ld bc, Snake2bpp.end - Snake2bpp
+	call SafeCpy
+	; copy statusbar tiles
+	ld hl, Statusbar1bpp
+	ld bc, Statusbar1bpp.end - Statusbar1bpp
+	call SafeCpy1bpp
+	; copy other graphics
+	ld hl, Arrow2bpp
+	ld bc, Arrow2bpp.end - Arrow2bpp
+	call SafeCpy
+	; copy more graphics
+	ld hl, Title1bpp
+	ld de, _VRAM+$1000
+	ld bc, Title1bpp.end - Title1bpp
+	call SafeCpy1bpp
+	; copy just a few more tiles
+	ld hl, GameOver1bpp
+	ld de, _VRAM+$800
+	ld bc, GameOver1bpp.end - GameOver1bpp
+	call SafeCpy1bpp
+	; enable interrupts
+	xor a
+	ldh [rIF], a
+	ld a, IEF_VBLANK
+	ldh [rIE], a
+	ei
+	; load base palette
+	ld a, $e4
+	ldh [rBGP], a
+	ld a, BCPSF_AUTOINC | 0
+	ld hl, BaseCPal
+	lb bc, BaseCPal.end - BaseCPal, LOW(rBCPS)
+	halt
+	call PalCpy
+	; load snake palette
+	ld a, BCPSF_AUTOINC | 8
+	ld hl, SnakeCPal
+	lb bc, SnakeCPal.end - SnakeCPal, LOW(rBCPS)
+	call PalCpy
+	; end
+		;ld b, b
+	jp MainLoop
+
+TilemapCpy: ; hl - src, de - dest, b - rows, c - columns, a - 32-columns
+	push af
+	.loop
+		ld a, [hl+]
+		ld [de], a
+		inc de
+		dec c
+		jr nz, .loop
+	pop af
+	push af
+	ld c, SCRN_X_B
+		add a, e ; add hl, a
+		ld e, a
+		adc d
+		sub e
+		ld d, a
+	dec b
+	jr nz, .loop
+	pop af
+	ret
+
+SECTION "ginit", ROM0
+
+GameInit::
+	xor a
+	ld [wSnakeBuffer.head], a
+	ldh [hDelay], a
+	ld a, SNAKE_LENGTH
+	ld [wSnakeBuffer.length], a
+	; reset snake Y pos
+	ld a, SNAKE_Y
+	ld hl, wSnakeBuffer.y
+	ld b, 0
+	call ShortSet
+	; reset snake X pos
+	if SNAKE_X != SNAKE_Y
+		ld a, SNAKE_X
+	endc
+	call ShortSet
+	; reset game vars
+	xor a
+	ld hl, wGameData
+	ld b, wGameDataEnd - wGameData
+	call ShortSet
+	; reset velocities etc
+	ld a, PADF_UP
+	ldh [hFacing], a
+	ld a, PADF_DOWN
+	ldh [hFacing.forbid], a
+	ld a, -1
+	ldh [hVel.y], a
+	xor a
+	ldh [hVel.x], a
+	ldh [hBonus+0], a
+	ldh [hBonus+1], a
+	ldh [hGrading], a
+	; reset food
+	call FoodReset
+	; reset tilemap
+	ld hl, wGameTilemap.statusbar
+	ld bc, wGameTilemap.end - wGameTilemap.statusbar
+	ld a, BASE_SOLID
+	call MemSet
+	ld hl, wGameTilemap
+	ld de, _SCRN0
+	ld bc, wGameTilemap.statusbar - wGameTilemap
+	call SafeCpy
+	ret
+
+SECTION "1bppcpy", ROM0
+SafeCpy1bpp:: ; like "SafeCpy", but modified for 1bpp
+	.loop
+	; wait for blanking
+	ldh a, [rSTAT]
+	and STATF_BUSY
+	jr nz, .loop
+	; copy the byte twice
+	ld a, [hl+]
+	ld [de], a
+	inc e
+	ld [de], a
+	inc de
+	; check if all bytes got copied
+	dec bc
+	ld a, b
+	or c
+	jr nz, .loop ; repeat
+	ret
+
+/* temporarily removed cause itll trip on the homebrew hub emulator
+SECTION "bademuchr", ROM0
+Bad1bpp:
+	INCBIN "gfx/bin/bad.1bpp"
+	.end
+BadPal:
+	dw $7fff, $56B5, $294A, $0000
+	.end
+
+SECTION "registers", ROM0
+EmuRegs:
+	dw $0100, $FF13, $00C1, $8403 ; DMG0
+	dw $01B0, $0013, $00D8, $014D ; DMG
+	dw $FFB0, $0013, $00D8, $014D ; MGB
+	dw $0100, $0014, $0000, $C060 ; SGB
+	dw $FF00, $0014, $0000, $C060 ; SGB2
+	dw $1180, $0000, $FF56, $000D ; CGB
+	dw $1100, $0100, $FF56, $000D ; AGB
+	.end
+*/
+
+SECTION "packets", ROM0
+Packets:
+.mlt
+db MLT_REQ+1, 3
+.mask
+db MASK_EN+1, 2
+.unMask
+db MASK_EN+1, 0
+.chr
+db CHR_TRN+1, 0
+.pct
+db PCT_TRN+1, 0
+.palTrn
+db PAL_TRN+1, 0
+.attrTrn
+db ATTR_TRN+1, 0
+.unMlt
+db MLT_REQ+1, 0
+
+.palTitle
+db PAL_SET+1
+ds 8, $00
+db %11000000 | $00
+ds 6, $00
+.palGame
+db PAL_SET+1
+ds 2, $00
+db $01
+ds 5, $00
+db %11000000 | $01
+ds 6, $00
+
+SECTION "rampackets", WRAM0
+wSPalTitle::	ds 16
+wSPalGame::	ds 3
+.pal::		ds 13
